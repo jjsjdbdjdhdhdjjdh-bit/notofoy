@@ -36,16 +36,11 @@ ROBLOX_API_URL = f"https://games.roblox.com/v1/games/{ROBLOX_PLACE_ID}/servers/P
 
 # ==================== CACHE DE JOB IDS ====================
 
-# Cache: guarda a lista de job ids e quando foi atualizado
 _job_ids_cache: List[str] = []
 _cache_updated_at: Optional[datetime] = None
-CACHE_TTL_SECONDS = 60  # só bate na API do Roblox a cada 60 segundos
+CACHE_TTL_SECONDS = 60
 
 async def get_cached_job_ids() -> List[str]:
-    """
-    Retorna job ids do cache se ainda for válido.
-    Só faz request para a Roblox API se o cache estiver vazio ou expirado.
-    """
     global _job_ids_cache, _cache_updated_at
 
     agora = datetime.now()
@@ -74,14 +69,12 @@ async def get_cached_job_ids() -> List[str]:
                 else:
                     print(f"[{agora}] Roblox API retornou lista vazia, mantendo cache anterior")
             elif response.status_code == 429:
-                # Rate limit: mantém o cache antigo e avisa
                 print(f"[{agora}] ⚠️ Rate limit na Roblox API! Usando cache anterior ({len(_job_ids_cache)} ids)")
             else:
                 print(f"[{agora}] ⚠️ Roblox API retornou {response.status_code}, usando cache anterior")
 
         except Exception as e:
             print(f"[{agora}] ❌ Erro ao buscar JobIds: {str(e)}, usando cache anterior")
-
     else:
         segundos_restantes = CACHE_TTL_SECONDS - (agora - _cache_updated_at).seconds
         print(f"[{agora}] Cache válido, próxima atualização em {segundos_restantes}s ({len(_job_ids_cache)} ids)")
@@ -90,9 +83,12 @@ async def get_cached_job_ids() -> List[str]:
 
 # ==================== DISCORD WEBHOOKS ====================
 
-WEBHOOK_TIER1 = "https://discord.com/api/webhooks/1475930962058809374/FTMkdVixDnf9YqQm5ThfFvUFlsjwVBk0DNyRQ2GO5LzL5Db49UKKX7plu12KvOPMZ2B1"
-WEBHOOK_TIER2 = "https://discord.com/api/webhooks/1475931685248962713/ZctsZCXwKJwUDBcbR7nkYZNQTA2XrJ0nveByDUVsgZrj2tn00MVCZIh1IEsqVpEuGzzr"
-WEBHOOK_TIER3 = "https://discord.com/api/webhooks/1475932404018577420/_X-STRZ9U1j7ku4kL52BKaptMYH54Wc4K348EsJ-wikegtzlZXB8SKfhhc75P-RZEIjq"
+WEBHOOK_TIER1  = "https://discord.com/api/webhooks/1475930962058809374/FTMkdVixDnf9YqQm5ThfFvUFlsjwVBk0DNyRQ2GO5LzL5Db49UKKX7plu12KvOPMZ2B1"
+WEBHOOK_TIER2  = "https://discord.com/api/webhooks/1475931685248962713/ZctsZCXwKJwUDBcbR7nkYZNQTA2XrJ0nveByDUVsgZrj2tn00MVCZIh1IEsqVpEuGzzr"
+WEBHOOK_TIER3  = "https://discord.com/api/webhooks/1475932404018577420/_X-STRZ9U1j7ku4kL52BKaptMYH54Wc4K348EsJ-wikegtzlZXB8SKfhhc75P-RZEIjq"
+WEBHOOK_GEN    = "https://discord.com/api/webhooks/1475951743346020528/XvaYbU76Rj7ex7Tszy-4nhcb96kTI6pJAXv78ZVpbXso3rKrd5VD9iywqpu5kcSXhCHc"
+
+# ==================== TIERS ====================
 
 TIER1_PETS = {
     "Dragon Canelonni", "La Supreme Combinasion", "Cerberus",
@@ -116,12 +112,17 @@ TIER3_PETS = {
     "Money Money Puggy", "Nuclearo Dinossauro", "Tacorita Bicicleta",
 }
 
+ALL_TIER_PETS = TIER1_PETS | TIER2_PETS | TIER3_PETS
+
 TIER_COLORS = {1: 0xFF0000, 2: 0xFF8C00, 3: 0xFFD700}
 TIER_LABELS = {
     1: "🔴 TIER 1 — ULTRA RARO",
     2: "🟠 TIER 2 — MUITO RARO",
     3: "🟡 TIER 3 — RARO",
 }
+
+GEN_MIN = 100_000      # 100k
+GEN_MAX = 10_000_000   # 10M
 
 # ==================== FUNÇÕES AUXILIARES ====================
 
@@ -137,37 +138,70 @@ def get_pet_tier(pet: Pet) -> Optional[int]:
         return 3
     return None
 
+def is_gen_notable(pet: Pet) -> bool:
+    """
+    Retorna True se o pet não está em nenhum tier
+    e tem gen entre 100k e 10M (exclusive).
+    """
+    name = pet.index.strip()
+    if name in ALL_TIER_PETS or name == "Capitano Moby":
+        return False
+    return GEN_MIN < pet.gen < GEN_MAX
+
 def get_webhook_for_tier(tier: int) -> str:
     return {1: WEBHOOK_TIER1, 2: WEBHOOK_TIER2, 3: WEBHOOK_TIER3}[tier]
 
-async def send_discord_embed(pet: Pet, tier: int, player_id: str, job_id: Optional[str]):
-    webhook_url = get_webhook_for_tier(tier)
-    fields = [
-        {"name": "🐾 Pet",      "value": pet.index,   "inline": True},
-        {"name": "⭐ Raridade",  "value": pet.rarity,  "inline": True},
-        {"name": "🧬 Gen",       "value": f"{pet.gen:,} ({pet.genText})", "inline": True},
-        {"name": "🔬 Mutação",   "value": pet.mutation or "Nenhuma", "inline": True},
-        {"name": "✨ Traits",    "value": pet.traits   or "Nenhum",  "inline": True},
-        {"name": "👤 Player ID", "value": player_id,   "inline": True},
-        {"name": "🖥️ Job ID",   "value": job_id or "Desconhecido", "inline": False},
+def build_fields(pet: Pet, player_id: str, job_id: Optional[str]) -> list:
+    return [
+        {"name": "🐾 Pet",      "value": pet.index,                        "inline": True},
+        {"name": "⭐ Raridade",  "value": pet.rarity,                       "inline": True},
+        {"name": "🧬 Gen",       "value": f"{pet.gen:,} ({pet.genText})",   "inline": True},
+        {"name": "🔬 Mutação",   "value": pet.mutation or "Nenhuma",        "inline": True},
+        {"name": "✨ Traits",    "value": pet.traits   or "Nenhum",         "inline": True},
+        {"name": "👤 Player ID", "value": player_id,                        "inline": True},
+        {"name": "🖥️ Job ID",   "value": job_id or "Desconhecido",         "inline": False},
     ]
-    embed = {
-        "title": f"{TIER_LABELS[tier]} ENCONTRADO!",
-        "description": f"**{pet.index}** foi detectado no upload de pets!",
-        "color": TIER_COLORS[tier],
-        "fields": fields,
-        "footer": {"text": f"Roblox Pets API • {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"},
-    }
-    payload = {"username": "Pets Detector 🐾", "embeds": [embed]}
+
+async def send_webhook(url: str, payload: dict):
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(webhook_url, json=payload, timeout=10.0)
-            if response.status_code in (200, 204):
-                print(f"[{datetime.now()}] ✅ Embed Tier {tier}: {pet.index} (Player: {player_id})")
-            else:
-                print(f"[{datetime.now()}] ⚠️ Falha embed: {response.status_code}")
+            response = await client.post(url, json=payload, timeout=10.0)
+            if response.status_code not in (200, 204):
+                print(f"[{datetime.now()}] ⚠️ Webhook falhou: {response.status_code}")
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Erro Discord: {str(e)}")
+        print(f"[{datetime.now()}] ❌ Erro webhook: {str(e)}")
+
+async def send_discord_embed(pet: Pet, tier: int, player_id: str, job_id: Optional[str]):
+    payload = {
+        "username": "Pets Detector 🐾",
+        "embeds": [{
+            "title": f"{TIER_LABELS[tier]} ENCONTRADO!",
+            "description": f"**{pet.index}** foi detectado no upload de pets!",
+            "color": TIER_COLORS[tier],
+            "fields": build_fields(pet, player_id, job_id),
+            "footer": {"text": f"Roblox Pets API • {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"},
+        }]
+    }
+    print(f"[{datetime.now()}] ✅ Embed Tier {tier}: {pet.index} (Player: {player_id})")
+    await send_webhook(get_webhook_for_tier(tier), payload)
+
+async def send_discord_gen_embed(pet: Pet, player_id: str, job_id: Optional[str]):
+    """Envia embed para pets não catalogados com gen entre 100k e 10M."""
+    payload = {
+        "username": "Pets Detector 🐾",
+        "embeds": [{
+            "title": "🔵 PET COM GEN NOTÁVEL ENCONTRADO!",
+            "description": (
+                f"**{pet.index}** não está nos tiers mas tem gen **{pet.gen:,}** "
+                f"(entre 100k e 10M)!"
+            ),
+            "color": 0x00BFFF,  # Azul
+            "fields": build_fields(pet, player_id, job_id),
+            "footer": {"text": f"Roblox Pets API • {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"},
+        }]
+    }
+    print(f"[{datetime.now()}] ✅ Gen embed: {pet.index} gen={pet.gen:,} (Player: {player_id})")
+    await send_webhook(WEBHOOK_GEN, payload)
 
 # ==================== ENDPOINTS ====================
 
@@ -178,9 +212,9 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "POST /upload": "Enviar pets do player",
-            "GET /get-job": "Obter JobId aleatório",
-            "GET /pets": "Listar pets",
-            "GET /stats": "Estatísticas",
+            "GET /get-job":  "Obter JobId aleatório",
+            "GET /pets":     "Listar pets",
+            "GET /stats":    "Estatísticas",
         }
     }
 
@@ -197,9 +231,16 @@ async def upload_pets(data: PetsUpload, player_id: Optional[str] = "default_play
             pets_database[player_id].append(pet_dict)
 
             tier = get_pet_tier(pet)
+
             if tier is not None:
+                # Pet catalogado num tier → webhook do tier
                 asyncio.create_task(
                     send_discord_embed(pet, tier, player_id, data.current_job_id)
+                )
+            elif is_gen_notable(pet):
+                # Pet fora dos tiers com gen entre 100k e 10M → webhook de gen
+                asyncio.create_task(
+                    send_discord_gen_embed(pet, player_id, data.current_job_id)
                 )
 
         print(f"[{datetime.now()}] Player '{player_id}' enviou {len(data.pets)} pets | JobId: {data.current_job_id}")
@@ -215,10 +256,6 @@ async def get_uploaded_pets(player_id: Optional[str] = "default_player"):
 
 @app.get("/get-job")
 async def get_job_id():
-    """
-    Retorna um JobId aleatório do cache.
-    Só bate na Roblox API se o cache estiver vazio ou tiver passado 60 segundos.
-    """
     job_ids = await get_cached_job_ids()
 
     if not job_ids:
@@ -228,7 +265,7 @@ async def get_job_id():
     return {
         "jobId": chosen,
         "total_servers": len(job_ids),
-        "cache_age_seconds": int((datetime.now() - _cache_updated_at).total_seconds()) if _cache_updated_at else 0
+        "cache_age_seconds": int((datetime.now() - _cache_updated_at).total_seconds()) if _cache_updated_at else 0,
     }
 
 @app.get("/pets")
